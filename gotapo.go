@@ -72,7 +72,7 @@ type tapo struct {
 	deviceModel    string
 	deviceId       string
 	presets        []*presets
-	lastPosition   string
+	lastPosition   int
 	LastFile       string
 	Elements       *elements
 	Settings       *settings
@@ -424,7 +424,6 @@ func (o *tapo) query(data []byte) []byte {
 	resp, _ := client.Do(req)
 	b, _ := ioutil.ReadAll(resp.Body)
 	defer resp.Body.Close()
-	p(string(b))
 	return b
 }
 
@@ -484,41 +483,55 @@ func (o *tapo) getPresets() {
 		pos.Id = v
 		pos.Name = result.Preset.Preset.Name[i]
 		o.presets = append(o.presets, pos)
+
 	}
 }
 
 // Switch to next preset
 func (o *tapo) setNextPreset() {
 	o.update()
-	max := -999
+	o.lastPosition = o.rLast()
+	max := -9999
+	min := 9999
+	nextId := 0
+	nextFind := false
 	for _, v := range o.presets {
-		if vId, _ := strconv.Atoi(string(v.Id)); vId > max {
+		vId, _ := strconv.Atoi(string(v.Id))
+		if vId < min {
+			min = vId
+		}
+		if vId > max {
 			max = vId
 		}
 	}
-	if o.rLast() == max {
-		o.lastPosition = "0"
-		o.wLast("0")
-	}
-	for _, v := range o.presets {
-		vId, _ := strconv.Atoi(string(v.Id))
-		if vId > o.rLast() {
-			bodyStruct := new(NextPreset)
-			bodyStruct.Method = MethodDo
-			bodyStruct.Preset.GotoPreset.ID = v.Id
-			data, _ := json.Marshal(bodyStruct)
-			if o.Settings.PresetChangeOsd.Value {
-				o.Settings.OsdText = v.Name
-				o.Settings.VisibleOsdText.Value = true
-				o.Settings.VisibleOsdTime.Value = true
-				o.setOsd()
+	for ici := 1; ici < 2; ici++ {
+		nlp := o.lastPosition + ici
+		if !nextFind {
+			for k, v := range o.presets {
+				vId, _ := strconv.Atoi(string(v.Id))
+				if nlp > max && !nextFind {
+					nlp = min
+				}
+				if vId == nlp && !nextFind {
+					nextId = k
+					nextFind = true
+				}
 			}
-			o.query(data)
-			o.lastPosition = v.Id
-			o.wLast(v.Id)
-			break
 		}
 	}
+	v := o.presets[nextId]
+	bodyStruct := new(NextPreset)
+	bodyStruct.Method = MethodDo
+	bodyStruct.Preset.GotoPreset.ID = v.Id
+	data, _ := json.Marshal(bodyStruct)
+	if o.Settings.PresetChangeOsd.Value {
+		o.Settings.OsdText = v.Name
+		o.Settings.VisibleOsdText.Value = true
+		o.Settings.VisibleOsdTime.Value = true
+		o.setOsd()
+	}
+	o.query(data)
+	o.wLast(v.Id)
 }
 
 // Write log last file
@@ -528,19 +541,19 @@ func (o *tapo) wLast(text string) {
 
 // Read log last file
 func (o *tapo) rLast() int {
-	last := 0
 	if last_, err := ioutil.ReadFile(o.LastFile + `/` + LastFileName); err == nil {
-		last, _ = strconv.Atoi(string(last_))
+		last, _ := strconv.Atoi(string(last_))
+		return last
 	} else {
 		os.Create(o.LastFile + `/` + LastFileName)
 		o.wLast("0")
 	}
-	return last
+	return 0
 }
 
 // Run all presets with timer beetween
 func (o *tapo) runAllPresets(timer string) {
-	o.lastPosition = "0"
+	//o.lastPosition = "0"
 	o.wLast("0")
 	dur_, _ := time.ParseDuration(timer)
 	for range o.presets {
@@ -593,7 +606,7 @@ func (o *tapo) setAlarm() {
 	bodyStruct.Method = MethodSet
 	bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmType = bsBool(o.Settings.DetectSoundAlternativeMode.Value)
 	bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.LightType = "1"
-	bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.Enabled = sBool(o.Settings.DetectEnableSound.Value || o.Settings.DetectEnableFlash.Value)
+	bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.Enabled = sBool(o.Elements.AlarmMode.Value)
 	bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode = addBoolArrString(bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode, o.Settings.DetectEnableSound.Value, "sound")
 	bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode = addBoolArrString(bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode, o.Settings.DetectEnableFlash.Value, "light")
 	bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode = addBoolArrString(bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode, !(o.Settings.DetectEnableSound.Value && o.Settings.DetectEnableFlash.Value), "sound")
@@ -693,7 +706,8 @@ func (o *tapo) setOsd() {
 		o.getOsd()
 	}
 	if len(o.Settings.OsdText) > 16 {
-		o.Settings.OsdText = o.Settings.OsdText[0:16]
+		//16 symbols, not bytes
+		o.Settings.OsdText = string([]rune(o.Settings.OsdText)[0:16])
 	}
 	o.update()
 	bodyStruct := new(osd)
