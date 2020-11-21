@@ -504,7 +504,7 @@ func (o *tapo) setNextPreset() {
 			max = vId
 		}
 	}
-	for ici := 1; ici < 2; ici++ {
+	for ici := 1; ici < 99; ici++ {
 		nlp := o.lastPosition + ici
 		if !nextFind {
 			for k, v := range o.presets {
