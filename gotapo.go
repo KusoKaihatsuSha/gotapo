@@ -44,6 +44,8 @@ type elements struct {
 }
 
 type settings struct {
+	User                       *Child
+	Time                       *Child
 	PresetChangeOsd            *Child
 	VisibleOsdTime             *Child
 	VisibleOsdText             *Child
@@ -59,13 +61,15 @@ type Child struct {
 	run   func()
 }
 
-type tapo struct {
+type Tapo struct {
 	Parameters     map[string]string
 	Host           string
 	Port           string
 	User           string
 	Password       string
+	UserID         string
 	stokId         string
+	TimeStr        string
 	userGroup      string
 	hashedPassword string
 	hostURL        string
@@ -234,6 +238,30 @@ type autotracking struct {
 	} `json:"target_track"`
 }
 
+type getUser struct {
+	Method    string `json:"method"`
+	GetUserID struct {
+		ID string `json:"id"`
+	} `json:"get_user_id"`
+}
+
+type getTime struct {
+	Method string `json:"method"`
+	System struct {
+		Name []string `json:"name"`
+	} `json:"system"`
+}
+
+type getTimeRet struct {
+	System struct {
+		ClockStatus struct {
+			SecondsFrom1970 int    `json:"seconds_from_1970"`
+			LocalTime       string `json:"local_time"`
+		} `json:"clock_status"`
+	} `json:"system"`
+	ErrorCode int `json:"error_code"`
+}
+
 type getOSD struct {
 	Method string `json:"method"`
 	OSD    struct {
@@ -330,7 +358,7 @@ func fnil() {
 }
 
 // Firsty initialise
-func (o *tapo) init() {
+func (o *Tapo) init() {
 	h := md5.New()
 	io.WriteString(h, o.Password)
 	o.hashedPassword = strings.ToUpper(fmt.Sprintf("%x", h.Sum(nil)))
@@ -404,12 +432,20 @@ func (o *tapo) init() {
 	o.Elements.AlarmMode.Value = false
 	o.Elements.AlarmMode.run = o.setAlarm
 
+	o.Settings.Time = new(Child)
+	o.Settings.Time.Value = true
+	o.Settings.Time.run = o.getTime
+
+	o.Settings.User = new(Child)
+	o.Settings.User.Value = true
+	o.Settings.User.run = o.getUser
+
 	o.NextPreset = o.setNextPreset
 	o.Reboot = o.rebootDevice
 }
 
 // POST query to cam
-func (o *tapo) query(data []byte) []byte {
+func (o *Tapo) query(data []byte) []byte {
 	body := bytes.NewReader(data)
 	req, _ := http.NewRequest("POST", o.hostURL, body)
 	for k, v := range o.Parameters {
@@ -421,14 +457,20 @@ func (o *tapo) query(data []byte) []byte {
 		},
 	}
 	client := &http.Client{Transport: tr}
-	resp, _ := client.Do(req)
-	b, _ := ioutil.ReadAll(resp.Body)
+	resp, err := client.Do(req)
+	if err != nil {
+		return []byte{}
+	}
+	b, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return []byte{}
+	}
 	defer resp.Body.Close()
 	return b
 }
 
 // Refresh stok. For authentication
-func (o *tapo) update() {
+func (o *Tapo) update() {
 	o.hostURL = `https://` + o.Host + `:` + o.Port
 	bodyStruct := new(updateStok)
 	result := new(updateStokReturn)
@@ -444,7 +486,7 @@ func (o *tapo) update() {
 }
 
 // Get information about device tapo c200
-func (o *tapo) getDevice() {
+func (o *Tapo) getDevice() {
 	o.update()
 	bodyStruct := new(device)
 	result := new(deviceRet)
@@ -459,7 +501,7 @@ func (o *tapo) getDevice() {
 // Manual move
 //  10 = 10 degree
 // -10 = 10 degree reverse
-func (o *tapo) setMovePosition(x int, y int) {
+func (o *Tapo) setMovePosition(x int, y int) {
 	o.update()
 	bodyStruct := new(MovePosition)
 	bodyStruct.Method = MethodDo
@@ -470,7 +512,7 @@ func (o *tapo) setMovePosition(x int, y int) {
 }
 
 // Get all making Presets in App
-func (o *tapo) getPresets() {
+func (o *Tapo) getPresets() {
 	o.update()
 	bodyStruct := new(PresetList)
 	result := new(PresetListReturn)
@@ -488,73 +530,67 @@ func (o *tapo) getPresets() {
 }
 
 // Switch to next preset
-func (o *tapo) setNextPreset() {
+func (o *Tapo) setNextPreset() {
 	o.update()
 	o.lastPosition = o.rLast()
-	max := -9999
-	min := 9999
-	nextId := 0
-	nextFind := false
+	max := new(presets)
+	max.Id = "-9999"
+	min := new(presets)
+	min.Id = "9999"
+	next := new(presets)
+	next.Id = "0"
+	check := true
 	for _, v := range o.presets {
-		vId, _ := strconv.Atoi(string(v.Id))
-		if vId < min {
-			min = vId
+		vId, _ := strconv.Atoi(v.Id)
+		minId, _ := strconv.Atoi(min.Id)
+		maxId, _ := strconv.Atoi(max.Id)
+		if vId < minId {
+			min = v
 		}
-		if vId > max {
-			max = vId
+		if vId > maxId {
+			max = v
 		}
-	}
-	for ici := 1; ici < 99; ici++ {
-		nlp := o.lastPosition + ici
-		if !nextFind {
-			for k, v := range o.presets {
-				vId, _ := strconv.Atoi(string(v.Id))
-				if nlp > max && !nextFind {
-					nlp = min
-				}
-				if vId == nlp && !nextFind {
-					nextId = k
-					nextFind = true
-				}
-			}
+		if vId > o.lastPosition && check {
+			next = v
+			check = false
 		}
 	}
-	v := o.presets[nextId]
+	if next.Id == "0" {
+		next = min
+		o.wLast(min.Id)
+	}
 	bodyStruct := new(NextPreset)
 	bodyStruct.Method = MethodDo
-	bodyStruct.Preset.GotoPreset.ID = v.Id
+	bodyStruct.Preset.GotoPreset.ID = next.Id
 	data, _ := json.Marshal(bodyStruct)
 	if o.Settings.PresetChangeOsd.Value {
-		o.Settings.OsdText = v.Name
+		o.Settings.OsdText = next.Name
 		o.Settings.VisibleOsdText.Value = true
 		o.Settings.VisibleOsdTime.Value = true
 		o.setOsd()
 	}
 	o.query(data)
-	o.wLast(v.Id)
+	o.wLast(next.Id)
 }
 
 // Write log last file
-func (o *tapo) wLast(text string) {
+func (o *Tapo) wLast(text string) {
 	ioutil.WriteFile(o.LastFile+`/`+LastFileName, []byte(text), 0775)
 }
 
 // Read log last file
-func (o *tapo) rLast() int {
+func (o *Tapo) rLast() int {
 	if last_, err := ioutil.ReadFile(o.LastFile + `/` + LastFileName); err == nil {
 		last, _ := strconv.Atoi(string(last_))
 		return last
 	} else {
 		os.Create(o.LastFile + `/` + LastFileName)
-		o.wLast("0")
 	}
 	return 0
 }
 
 // Run all presets with timer beetween
-func (o *tapo) runAllPresets(timer string) {
-	//o.lastPosition = "0"
-	o.wLast("0")
+func (o *Tapo) runAllPresets(timer string) {
 	dur_, _ := time.ParseDuration(timer)
 	for range o.presets {
 		time.Sleep(dur_)
@@ -563,7 +599,7 @@ func (o *tapo) runAllPresets(timer string) {
 }
 
 // Reboot device
-func (o *tapo) rebootDevice() {
+func (o *Tapo) rebootDevice() {
 	o.update()
 	bodyStruct := new(reboot)
 	bodyStruct.Method = MethodDo
@@ -600,7 +636,7 @@ func addBoolArrString(arr []string, b bool, val string) []string {
 // DetectEnableSound - include noise
 // DetectSoundAlternativeMode - sound like a bip
 // DetectEnableFlash - blinking led diode
-func (o *tapo) setAlarm() {
+func (o *Tapo) setAlarm() {
 	o.update()
 	bodyStruct := new(alarm)
 	bodyStruct.Method = MethodSet
@@ -615,7 +651,7 @@ func (o *tapo) setAlarm() {
 }
 
 // Turn Indicator diode (red, green)
-func (o *tapo) setLed() {
+func (o *Tapo) setLed() {
 	o.update()
 	bodyStruct := new(led)
 	bodyStruct.Method = MethodSet
@@ -625,8 +661,36 @@ func (o *tapo) setLed() {
 
 }
 
+// Get Time
+func (o *Tapo) getTime() {
+	o.update()
+	result := new(getTimeRet)
+	bodyStruct := new(getTime)
+	bodyStruct.Method = MethodGet
+	bodyStruct.System.Name = []string{"clock_status"}
+	data, _ := json.Marshal(bodyStruct)
+	json.Unmarshal(o.query(data), &result)
+	o.TimeStr = result.System.ClockStatus.LocalTime
+	p(string(data))
+	p(string(o.query(data)))
+}
+
+// Get User
+func (o *Tapo) getUser() {
+	o.update()
+	//result := new(getTimeRet)
+	bodyStruct := new(getUser)
+	bodyStruct.Method = MethodGet
+	//	bodyStruct.System.GetUserID = "null"
+	data, _ := json.Marshal(bodyStruct)
+	//json.Unmarshal(o.query(data), &result)
+	//o.TimeStr = result.System.ClockStatus.LocalTime
+	p(string(data))
+	p(string(o.query(data)))
+}
+
 // Motion detect with sensitivity
-func (o *tapo) setDetect() {
+func (o *Tapo) setDetect() {
 	o.update()
 	bodyStruct := new(detect)
 	bodyStruct.Method = MethodSet
@@ -646,7 +710,7 @@ func (o *tapo) setDetect() {
 }
 
 // Turn camera in private mode with stop video channel
-func (o *tapo) setPrivacy() {
+func (o *Tapo) setPrivacy() {
 	o.update()
 	bodyStruct := new(privacy)
 	bodyStruct.Method = MethodSet
@@ -656,7 +720,7 @@ func (o *tapo) setPrivacy() {
 }
 
 // Turn irc flashlight
-func (o *tapo) setNightMode() {
+func (o *Tapo) setNightMode() {
 	o.update()
 	bodyStruct := new(nightMode)
 	bodyStruct.Method = MethodSet
@@ -666,7 +730,7 @@ func (o *tapo) setNightMode() {
 }
 
 // Turn irc flashlight
-func (o *tapo) setNightModeAuto() {
+func (o *Tapo) setNightModeAuto() {
 	if o.Elements.NightModeAuto.Value {
 		o.update()
 		bodyStruct := new(nightMode)
@@ -678,7 +742,7 @@ func (o *tapo) setNightModeAuto() {
 }
 
 // Autotracking all motion. BETA
-func (o *tapo) setAutotracking() {
+func (o *Tapo) setAutotracking() {
 	o.update()
 	bodyStruct := new(autotracking)
 	bodyStruct.Method = MethodSet
@@ -688,7 +752,7 @@ func (o *tapo) setAutotracking() {
 }
 
 // get Text OSD
-func (o *tapo) getOsd() {
+func (o *Tapo) getOsd() {
 	o.update()
 	bodyStruct := new(getOSD)
 	result := new(getOSDRet)
@@ -701,7 +765,7 @@ func (o *tapo) getOsd() {
 }
 
 // Text OSD
-func (o *tapo) setOsd() {
+func (o *Tapo) setOsd() {
 	if len(o.Settings.OsdText) == 0 {
 		o.getOsd()
 	}
@@ -732,8 +796,8 @@ func (o *tapo) setOsd() {
 	o.query(data)
 }
 
-func Connect(host string, user string, password string) *tapo {
-	o := new(tapo)
+func Connect(host string, user string, password string) *Tapo {
+	o := new(Tapo)
 	o.LastFile, _ = filepath.Abs(filepath.Dir(os.Args[0]))
 	o.Host = host
 	o.Port = "443"
@@ -756,34 +820,34 @@ func (o *Child) Off() {
 	o.run()
 }
 
-func (o *tapo) On(s Action) {
+func (o *Tapo) On(s Action) {
 	s.On()
 }
 
-func (o *tapo) Off(s Action) {
+func (o *Tapo) Off(s Action) {
 	s.Off()
 }
 
-func (o *tapo) MoveRight(val int) {
+func (o *Tapo) MoveRight(val int) {
 	o.setMovePosition(val, 0)
 	time.Sleep(5 * time.Second)
 }
 
-func (o *tapo) MoveLeft(val int) {
+func (o *Tapo) MoveLeft(val int) {
 	o.setMovePosition(-val, 0)
 	time.Sleep(5 * time.Second)
 }
 
-func (o *tapo) MoveUp(val int) {
+func (o *Tapo) MoveUp(val int) {
 	o.setMovePosition(0, val)
 	time.Sleep(5 * time.Second)
 }
 
-func (o *tapo) MoveDown(val int) {
+func (o *Tapo) MoveDown(val int) {
 	o.setMovePosition(0, -val)
 	time.Sleep(5 * time.Second)
 }
 
-func (o *tapo) MoveTest() {
+func (o *Tapo) MoveTest() {
 	o.runAllPresets("10s")
 }
