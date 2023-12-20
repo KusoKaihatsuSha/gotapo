@@ -5,12 +5,15 @@ package gotapo
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/md5"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -39,8 +42,7 @@ const (
 	// MethodLogin as link to methods
 	MethodLogin = "login"
 
-	// LastFileName for naming file with last preset
-	LastFileName = "HereLastPreset"
+	EncryptType = "3"
 )
 
 var (
@@ -82,15 +84,21 @@ type presets struct {
 
 // elements type of Elements of cam
 type elements struct {
-	NightMode        *child
-	NightModeAuto    *child
-	PrivacyMode      *child
-	Indicator        *child
-	DetectMode       *child
-	AutotrackingMode *child
-	AlarmMode        *child
-	ImageCorrection  *child
-	ImageFlip        *child
+	NightMode            *child
+	NightModeAuto        *child
+	PrivacyMode          *child
+	Indicator            *child
+	DetectMode           *child
+	AutotrackingMode     *child
+	AlarmMode            *child
+	ImageCorrection      *child
+	ImageFlip            *child
+	MoveX                string
+	MoveY                string
+	AlarmModeUpdateFlash *child
+	AlarmModeUpdateSound *child
+	DetectPersonMode     *child
+	DetectModeUpdateSens *child
 }
 
 // settings type of Settings of cam
@@ -106,6 +114,7 @@ type settings struct {
 	DetectSoundAlternativeMode *child
 	DetectEnableSound          *child
 	DetectEnableFlash          *child
+	Move                       *child
 }
 
 // child assignment of function
@@ -116,30 +125,38 @@ type child struct {
 
 // Tapo is general type with Vals
 type Tapo struct {
-	Parameters     map[string]string
-	Host           string
-	Port           string
-	UserDef        string
-	User           string
-	Password       string
-	UserID         string
-	Rotate         bool
-	FishEye        bool
-	Flip           bool
-	stokID         string
-	TimeStr        string
-	userGroup      string
-	hashedPassword string
-	hostURL        string
-	deviceModel    string
-	deviceID       string
-	presets        []*presets
-	lastPosition   int
-	LastFile       string
-	Elements       *elements
-	Settings       *settings
-	NextPreset     func()
-	Reboot         func()
+	Parameters           map[string]string
+	Host                 string
+	Port                 string
+	UserDef              string
+	User                 string
+	Password             string
+	UserID               string
+	Rotate               bool
+	FishEye              bool
+	Flip                 bool
+	stokID               string
+	TimeStr              string
+	userGroup            string
+	hashedPassword       string
+	hashedPasswordMD5    string
+	hashedPasswordSha256 string
+	hostURL              string
+	hostURLStok          string
+	deviceModel          string
+	deviceID             string
+	presets              []*presets
+	lastPosition         int
+	LastFile             string
+	Elements             *elements
+	Settings             *settings
+	NextPreset           func()
+	Reboot               func()
+	InsecureAuth         bool
+	Iv                   []byte
+	Key                  []byte
+	Seq                  string
+	Encrypt              bool
 }
 
 // Action is general Action cam
@@ -164,6 +181,7 @@ type updateStokReturn struct {
 	Result    struct {
 		Stok      string `json:"stok"`
 		UserGroup string `json:"user_group"`
+		StartSeq  *int   `json:"start_seq"`
 	} `json:"result"`
 }
 
@@ -177,24 +195,42 @@ type device struct {
 
 // deviceRet type for device cam return
 type deviceRet struct {
-	DeviceInfo struct {
-		BasicInfo struct {
-			Barcode     string `json:"barcode"`
-			DevID       string `json:"dev_id"`
-			DeviceAlias string `json:"device_alias"`
-			DeviceInfo  string `json:"device_info"`
-			DeviceModel string `json:"device_model"`
-			DeviceName  string `json:"device_name"`
-			DeviceType  string `json:"device_type"`
-			Features    string `json:"features"`
-			HwDesc      string `json:"hw_desc"`
-			HwVersion   string `json:"hw_version"`
-			Mac         string `json:"mac"`
-			OemID       string `json:"oem_id"`
-			SwVersion   string `json:"sw_version"`
-		} `json:"basic_info"`
-	} `json:"device_info"`
-	ErrorCode int64 `json:"error_code"`
+	Result struct {
+		Responses []struct {
+			Method string `json:"method"`
+			Result struct {
+				DeviceInfo struct {
+					BasicInfo struct {
+						Ffs         bool   `json:"ffs"`
+						DeviceType  string `json:"device_type"`
+						DeviceModel string `json:"device_model"`
+						DeviceName  string `json:"device_name"`
+						DeviceInfo  string `json:"device_info"`
+						HwVersion   string `json:"hw_version"`
+						SwVersion   string `json:"sw_version"`
+						DeviceAlias string `json:"device_alias"`
+						Features    string `json:"features"`
+						Barcode     string `json:"barcode"`
+						Mac         string `json:"mac"`
+						DevID       string `json:"dev_id"`
+						OemID       string `json:"oem_id"`
+						HwDesc      string `json:"hw_desc"`
+					} `json:"basic_info"`
+				} `json:"device_info"`
+			} `json:"result"`
+			ErrorCode int `json:"error_code"`
+		} `json:"responses"`
+	} `json:"result"`
+	ErrorCode int `json:"error_code"`
+}
+
+type moveTo struct {
+	Method string `json:"method"`
+	Motor  struct {
+		MoveStep struct {
+			Derection string `json:"direction"`
+		} `json:"movestep"`
+	} `json:"motor"`
 }
 
 // movePosition type for moving cam
@@ -218,16 +254,24 @@ type presetList struct {
 
 // presetListReturn type for moving presets cam return
 type presetListReturn struct {
-	ErrorCode int64 `json:"error_code"`
-	Preset    struct {
-		Preset struct {
-			ID           []string `json:"id"`
-			Name         []string `json:"name"`
-			PositionPan  []string `json:"position_pan"`
-			PositionTilt []string `json:"position_tilt"`
-			ReadOnly     []string `json:"read_only"`
-		} `json:"preset"`
-	} `json:"preset"`
+	Result struct {
+		Responses []struct {
+			Method string `json:"method"`
+			Result struct {
+				Preset struct {
+					Preset struct {
+						ID           []string `json:"id"`
+						Name         []string `json:"name"`
+						PositionPan  []string `json:"position_pan"`
+						PositionTilt []string `json:"position_tilt"`
+						ReadOnly     []string `json:"read_only"`
+					} `json:"preset"`
+				} `json:"preset"`
+			} `json:"result"`
+			ErrorCode int `json:"error_code"`
+		} `json:"responses"`
+	} `json:"result"`
+	ErrorCode int `json:"error_code"`
 }
 
 // nextPreset type for moving next preset
@@ -322,20 +366,67 @@ type getImageSettings struct {
 
 // type get settings return
 type getImageSettingsRet struct {
-	Image struct {
-		Switch struct {
-			Name              string `json:".name"`
-			Type              string `json:".type"`
-			SwitchMode        string `json:"switch_mode"`
-			ScheduleStartTime string `json:"schedule_start_time"`
-			ScheduleEndTime   string `json:"schedule_end_time"`
-			RotateType        string `json:"rotate_type"`
-			FlipType          string `json:"flip_type"`
-			Ldc               string `json:"ldc"`
-			NightVisionMode   string `json:"night_vision_mode"`
-			WtlIntensityLevel string `json:"wtl_intensity_level"`
-		} `json:"switch"`
-	} `json:"image"`
+	Result struct {
+		Responses []struct {
+			Method string `json:"method"`
+			Result struct {
+				Image struct {
+					Switch struct {
+						Name              string `json:".name"`
+						Type              string `json:".type"`
+						SwitchMode        string `json:"switch_mode"`
+						ScheduleStartTime string `json:"schedule_start_time"`
+						ScheduleEndTime   string `json:"schedule_end_time"`
+						FlipType          string `json:"flip_type"`
+						RotateType        string `json:"rotate_type"`
+						Ldc               string `json:"ldc"`
+						NightVisionMode   string `json:"night_vision_mode"`
+						WtlIntensityLevel string `json:"wtl_intensity_level"`
+					} `json:"switch"`
+					Common struct {
+						Name                  string `json:".name"`
+						Type                  string `json:".type"`
+						Luma                  string `json:"luma"`
+						Contrast              string `json:"contrast"`
+						Chroma                string `json:"chroma"`
+						Saturation            string `json:"saturation"`
+						Sharpness             string `json:"sharpness"`
+						ExpType               string `json:"exp_type"`
+						Shutter               string `json:"shutter"`
+						FocusType             string `json:"focus_type"`
+						FocusLimited          string `json:"focus_limited"`
+						ExpGain               string `json:"exp_gain"`
+						InfStartTime          string `json:"inf_start_time"`
+						InfEndTime            string `json:"inf_end_time"`
+						InfSensitivity        string `json:"inf_sensitivity"`
+						InfDelay              string `json:"inf_delay"`
+						WideDynamic           string `json:"wide_dynamic"`
+						LightFreqMode         string `json:"light_freq_mode"`
+						WdGain                string `json:"wd_gain"`
+						WbType                string `json:"wb_type"`
+						WbRGain               string `json:"wb_R_gain"`
+						WbGGain               string `json:"wb_G_gain"`
+						WbBGain               string `json:"wb_B_gain"`
+						LockRedGain           string `json:"lock_red_gain"`
+						LockGrGain            string `json:"lock_gr_gain"`
+						LockGbGain            string `json:"lock_gb_gain"`
+						LockBlueGain          string `json:"lock_blue_gain"`
+						LockRedColton         string `json:"lock_red_colton"`
+						LockGreenColton       string `json:"lock_green_colton"`
+						LockBlueColton        string `json:"lock_blue_colton"`
+						LockSource            string `json:"lock_source"`
+						AreaCompensation      string `json:"area_compensation"`
+						Smartir               string `json:"smartir"`
+						SmartirLevel          string `json:"smartir_level"`
+						HighLightCompensation string `json:"high_light_compensation"`
+						Dehaze                string `json:"dehaze"`
+						InfType               string `json:"inf_type"`
+					} `json:"common"`
+				} `json:"image"`
+			} `json:"result"`
+			ErrorCode int `json:"error_code"`
+		} `json:"responses"`
+	} `json:"result"`
 	ErrorCode int `json:"error_code"`
 }
 
@@ -376,15 +467,6 @@ type getTimeRet struct {
 		} `json:"clock_status"`
 	} `json:"system"`
 	ErrorCode int `json:"error_code"`
-}
-
-// type working with OSD
-type getOSD struct {
-	Method string `json:"method"`
-	OSD    struct {
-		Name  []string `json:"name"`
-		Table []string `json:"table"`
-	} `json:"OSD"`
 }
 
 // type working with OSD return
@@ -443,6 +525,362 @@ type getOSDRet struct {
 }
 
 // type working with OSD
+type getOSD struct {
+	Method string `json:"method"`
+	Data   struct {
+		Name  []string `json:"name"`
+		Table []string `json:"table"`
+	} `json:"OSD"`
+}
+
+type setLed struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Value string `json:"enabled"`
+		} `json:"config"`
+	} `json:"led"`
+}
+
+type setPersonDetect struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Value string `json:"enabled"`
+		} `json:"detection"`
+	} `json:"people_detection"`
+}
+
+type deviceInfo struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"device_info"`
+	} `json:"params"`
+}
+type detectionConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"motion_detection"`
+	} `json:"params"`
+}
+type detectionConfigResponse struct {
+	Result struct {
+		Responses []struct {
+			Method string `json:"method"`
+			Result struct {
+				MotionDetection struct {
+					MotionDet struct {
+						Name               string `json:".name"`
+						Type               string `json:".type"`
+						Sensitivity        string `json:"sensitivity"`
+						DigitalSensitivity string `json:"digital_sensitivity"`
+						Enabled            string `json:"enabled"`
+					} `json:"motion_det"`
+				} `json:"motion_detection"`
+			} `json:"result"`
+			ErrorCode int `json:"error_code"`
+		} `json:"responses"`
+	} `json:"result"`
+	ErrorCode int `json:"error_code"`
+}
+type personDetectionConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"people_detection"`
+	} `json:"params"`
+}
+type vehicleDetectionConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"vehicle_detection"`
+	} `json:"params"`
+}
+type bcdConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"sound_detection"`
+	} `json:"params"`
+}
+type petDetectionConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"pet_detection"`
+	} `json:"params"`
+}
+type barkDetectionConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"bark_detection"`
+	} `json:"params"`
+}
+type meowDetectionConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"meow_detection"`
+	} `json:"params"`
+}
+type glassDetectionConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"glass_detection"`
+	} `json:"params"`
+}
+type tamperDetectionConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name string `json:"name"`
+		} `json:"tamper_detection"`
+	} `json:"params"`
+}
+type lensMaskConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"lens_mask"`
+	} `json:"params"`
+}
+type ldc struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"image"`
+	} `json:"params"`
+}
+type lastAlarmInfo struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"msg_alarm"`
+	} `json:"params"`
+}
+
+type lastAlarmInfoResponse struct {
+	Result struct {
+		Responses []struct {
+			Method string `json:"method"`
+			Result struct {
+				MsgAlarm struct {
+					Chn1MsgAlarmInfo struct {
+						Name              string   `json:".name"`
+						Type              string   `json:".type"`
+						SoundAlarmEnabled string   `json:"sound_alarm_enabled"`
+						LightAlarmEnabled string   `json:"light_alarm_enabled"`
+						AlarmType         string   `json:"alarm_type"`
+						LightType         string   `json:"light_type"`
+						AlarmMode         []string `json:"alarm_mode"`
+						Enabled           string   `json:"enabled"`
+					} `json:"chn1_msg_alarm_info"`
+				} `json:"msg_alarm"`
+			} `json:"result"`
+			ErrorCode int `json:"error_code"`
+		} `json:"responses"`
+	} `json:"result"`
+	ErrorCode int `json:"error_code"`
+}
+
+type ledStatus struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"led"`
+	} `json:"params"`
+}
+type targetTrackConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"target_track"`
+	} `json:"params"`
+}
+type presetConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"preset"`
+	} `json:"params"`
+}
+type firmwareUpdateStatus struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"cloud_config"`
+	} `json:"params"`
+}
+type mediaEncrypt struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"cet"`
+	} `json:"params"`
+}
+type connectionType struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"get_connection_type"`
+		} `json:"network"`
+	} `json:"params"`
+}
+type alarmConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+		} `json:"msg_alarm"`
+	} `json:"params"`
+}
+type alarmPlan struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+		} `json:"msg_alarm_plan"`
+	} `json:"params"`
+}
+type sirenTypeList struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+		} `json:"msg_alarm"`
+	} `json:"params"`
+}
+type lightTypeList struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+		} `json:"msg_alarm"`
+	} `json:"params"`
+}
+type sirenStatus struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+		} `json:"msg_alarm"`
+	} `json:"params"`
+}
+type lightFrequencyInfo struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name string `json:"name"`
+		} `json:"image"`
+	} `json:"params"`
+}
+type lightFrequencyCapability struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name string `json:"name"`
+		} `json:"image"`
+	} `json:"params"`
+}
+type childDeviceList struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			StartIndex int `json:"start_index"`
+		} `json:"childControl"`
+	} `json:"params"`
+}
+type rotationStatus struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"image"`
+	} `json:"params"`
+}
+type nightVisionModeConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name string `json:"name"`
+		} `json:"image"`
+	} `json:"params"`
+}
+type whitelampStatus struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			GetWtlStatus []string `json:"get_wtl_status"`
+		} `json:"image"`
+	} `json:"params"`
+}
+type whitelampConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name string `json:"name"`
+		} `json:"image"`
+	} `json:"params"`
+}
+type msgPushConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"msg_push"`
+	} `json:"params"`
+}
+type sdCardStatus struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Table []string `json:"table"`
+		} `json:"harddisk_manage"`
+	} `json:"params"`
+}
+type circularRecordingConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name string `json:"name"`
+		} `json:"harddisk_manage"`
+	} `json:"params"`
+}
+type recordPlan struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"record_plan"`
+	} `json:"params"`
+}
+type firmwareAutoUpgradeConfig struct {
+	Method string `json:"method"`
+	Data   struct {
+		Type struct {
+			Name []string `json:"name"`
+		} `json:"auto_upgrade"`
+	} `json:"params"`
+}
+
+// type working with OSD
 type osd struct {
 	Method string `json:"method"`
 	OSD    struct {
@@ -471,15 +909,478 @@ type osd struct {
 	} `json:"OSD"`
 }
 
+type queryResponse struct {
+	ErrorCode int `json:"error_code"`
+	Seq       int `json:"seq"`
+	Result    struct {
+		Response string `json:"response"`
+	} `json:"result"`
+}
+
+type many struct {
+	Method string `json:"method"`
+	Params struct {
+		Requests []any `json:"requests"`
+	} `json:"params"`
+}
+
+type secure struct {
+	Method string `json:"method"`
+	Params struct {
+		Request string `json:"request"`
+	} `json:"params"`
+}
+
+// Auth with nonce usage
+type loginInsecure struct {
+	Method string `json:"method"`
+	Params struct {
+		Cnonce       string `json:"cnonce"`
+		EncryptType  string `json:"encrypt_type"`
+		DigestPasswd string `json:"digest_passwd,omitempty"`
+		Username     string `json:"username"`
+	} `json:"params"`
+}
+
+// Auth with nonce usage
+type loginInsecureResponse struct {
+	ErrorCode int `json:"error_code"`
+	Result    struct {
+		Data struct {
+			Code          int      `json:"code"`
+			EncryptType   []string `json:"encrypt_type"`
+			Key           string   `json:"key"`
+			Nonce         string   `json:"nonce"`
+			DeviceConfirm string   `json:"device_confirm"`
+		} `json:"data"`
+	} `json:"result"`
+}
+
 // nil func
 func fnil() {
 }
 
+func secureTemplate(values ...any) secure {
+	t := secure{}
+	t.Method = "securePassthrough"
+	t.Params.Request = values[0].(string)
+	return t
+}
+
+func manyTemplate(values ...any) many {
+	t := many{}
+	t.Method = "multipleRequest"
+	t.Params.Requests = append(t.Params.Requests, values...)
+	return t
+}
+
+func osdTemplate(values ...any) osd {
+	t := osd{}
+	t.Method = MethodSet
+	t.OSD.Date.Enabled = values[0].(string)
+	t.OSD.Date.XCoor = 0
+	t.OSD.Date.YCoor = 0
+	t.OSD.Font.Color = "white"
+	t.OSD.Font.ColorType = "auto"
+	t.OSD.Font.Display = "ntnb"
+	t.OSD.Font.Size = "auto"
+	t.OSD.LabelInfo1.Enabled = values[1].(string)
+	t.OSD.LabelInfo1.Text = values[2].(string)
+	t.OSD.LabelInfo1.XCoor = 0
+	t.OSD.LabelInfo1.YCoor = 450
+	//---china weeks---
+	t.OSD.Week.Enabled = new(Types).xBool(false).Default
+	t.OSD.Week.XCoor = 0
+	t.OSD.Week.YCoor = 0
+	return t
+}
+
+func alarmTemplate(values ...any) alarm {
+	t := alarm{}
+	t.Method = MethodSet
+	t.MsgAlarm.Chn1MsgAlarmInfo.AlarmType = values[0].(string)
+	t.MsgAlarm.Chn1MsgAlarmInfo.LightType = "1"
+	t.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode = values[1].([]string)
+	t.MsgAlarm.Chn1MsgAlarmInfo.Enabled = values[2].(string)
+	return t
+}
+
+func nextPresetTemplate(values ...any) nextPreset {
+	t := nextPreset{}
+	t.Method = MethodDo
+	t.Preset.GotoPreset.ID = values[0].(string)
+	return t
+}
+
+func loginNewTemplate(values ...any) loginInsecure {
+	t := loginInsecure{}
+	t.Method = MethodLogin
+	t.Params.Username = values[0].(string)
+	t.Params.EncryptType = EncryptType
+	t.Params.DigestPasswd = values[1].(string)
+	return t
+}
+
+func updateStokTemplate(values ...any) updateStok {
+	t := updateStok{}
+	t.Method = MethodLogin
+	t.Params.Hashed = true
+	t.Params.Username = values[0].(string)
+	t.Params.Password = values[1].(string)
+	return t
+}
+
+func getTimeTemplate(values ...any) getTime {
+	t := getTime{}
+	t.Method = MethodGet
+	t.System.Name = []string{"clock_status"}
+	return t
+}
+
+func setImageCorrectionTemplate(values ...any) setImageCorrection {
+	t := setImageCorrection{}
+	t.Method = MethodSet
+	t.Image.Switch.Ldc = values[0].(string)
+	return t
+}
+
+func setImageFlipTemplate(values ...any) setImageFlip {
+	t := setImageFlip{}
+	t.Method = MethodSet
+	t.Image.Switch.FlipType = values[0].(string)
+	return t
+}
+
+func detectTemplate(values ...any) detect {
+	t := detect{}
+	t.Method = MethodSet
+	switch values[1].(int) {
+	case 1:
+		t.MotionDetection.MotionDet.DigitalSensitivity = "20"
+	case 2:
+		t.MotionDetection.MotionDet.DigitalSensitivity = "50"
+	case 3:
+		t.MotionDetection.MotionDet.DigitalSensitivity = "80"
+	default:
+		t.MotionDetection.MotionDet.DigitalSensitivity = "20"
+	}
+	t.MotionDetection.MotionDet.Enabled = values[0].(string)
+	return t
+}
+
+func privacyTemplate(values ...any) privacy {
+	t := privacy{}
+	t.Method = MethodSet
+	t.LensMask.LensMaskInfo.Enabled = values[0].(string)
+	return t
+}
+
+func nightModeTemplate(values ...any) nightMode {
+	t := nightMode{}
+	t.Method = MethodSet
+	t.Image.Common.InfType = values[0].(string)
+	return t
+}
+
+func autotrackingTemplate(values ...any) autotracking {
+	t := autotracking{}
+	t.Method = MethodSet
+	t.TargetTrack.TargetTrackInfo.Enabled = values[0].(string)
+	return t
+}
+
+func getOSDTemplate(values ...any) getOSD {
+	t := getOSD{}
+	t.Method = MethodGet
+	t.Data.Name = []string{"date", "week", "font"}
+	t.Data.Table = []string{"label_info"}
+	return t
+}
+
+func loginInitTemplate(values ...any) loginInsecure {
+	t := loginInsecure{}
+	t.Method = MethodLogin
+	t.Params.Username = values[0].(string)
+	t.Params.EncryptType = EncryptType
+	return t
+}
+
+func rebootTemplate(values ...any) reboot {
+	t := reboot{}
+	t.Method = MethodDo
+	t.System.Reboot = "null"
+	return t
+}
+
+func moveToTemplate(values ...any) moveTo {
+	t := moveTo{}
+	t.Method = MethodDo
+	t.Motor.MoveStep.Derection = values[0].(string)
+	return t
+}
+
+func movePositionTemplate(values ...any) movePosition {
+	t := movePosition{}
+	t.Method = MethodDo
+	t.Motor.Move.XCoord = strconv.Itoa(values[0].(int))
+	t.Motor.Move.YCoord = strconv.Itoa(values[1].(int))
+	return t
+}
+
+func setLedTemplate(values ...any) setLed {
+	t := setLed{}
+	t.Method = MethodSet
+	t.Data.Type.Value = values[0].(string)
+	return t
+}
+
+func setPersonDetectTemplate(values ...any) setPersonDetect {
+	t := setPersonDetect{}
+	t.Method = MethodSet
+	t.Data.Type.Value = values[0].(string)
+	return t
+}
+
+func deviceInfoTemplate(values ...any) deviceInfo {
+	t := deviceInfo{}
+	t.Method = "getDeviceInfo"
+	t.Data.Type.Name = []string{"basic_info"}
+	return t
+}
+
+func detectionConfigTemplate(values ...any) detectionConfig {
+	t := detectionConfig{}
+	t.Method = "getDetectionConfig"
+	t.Data.Type.Name = []string{"motion_det"}
+	return t
+}
+
+func personDetectionConfigTemplate(values ...any) personDetectionConfig {
+	t := personDetectionConfig{}
+	t.Method = "getPersonDetectionConfig"
+	t.Data.Type.Name = []string{"detection"}
+	return t
+}
+
+func vehicleDetectionConfigTemplate(values ...any) vehicleDetectionConfig {
+	t := vehicleDetectionConfig{}
+	t.Method = "getVehicleDetectionConfig"
+	t.Data.Type.Name = []string{"detection"}
+	return t
+}
+
+func bcdConfigTemplate(values ...any) bcdConfig {
+	t := bcdConfig{}
+	t.Method = "getBCDConfig"
+	t.Data.Type.Name = []string{"bcd"}
+	return t
+}
+
+func petDetectionConfigTemplate(values ...any) petDetectionConfig {
+	t := petDetectionConfig{}
+	t.Method = "getPetDetectionConfig"
+	t.Data.Type.Name = []string{"detection"}
+	return t
+}
+
+func barkDetectionConfigTemplate(values ...any) barkDetectionConfig {
+	t := barkDetectionConfig{}
+	t.Method = "getBarkDetectionConfig"
+	t.Data.Type.Name = []string{"detection"}
+	return t
+}
+
+func meowDetectionConfigTemplate(values ...any) meowDetectionConfig {
+	t := meowDetectionConfig{}
+	t.Method = "getMeowDetectionConfig"
+	t.Data.Type.Name = []string{"detection"}
+	return t
+}
+
+func glassDetectionConfigTemplate(values ...any) glassDetectionConfig {
+	t := glassDetectionConfig{}
+	t.Method = "getGlassDetectionConfig"
+	t.Data.Type.Name = []string{"detection"}
+	return t
+}
+
+func tamperDetectionConfigTemplate(values ...any) tamperDetectionConfig {
+	t := tamperDetectionConfig{}
+	t.Method = "getTamperDetectionConfig"
+	t.Data.Type.Name = "tamper_det"
+	return t
+}
+
+func lensMaskConfigTemplate(values ...any) lensMaskConfig {
+	t := lensMaskConfig{}
+	t.Method = "getLensMaskConfig"
+	t.Data.Type.Name = []string{"lens_mask_info"}
+	return t
+}
+
+func ldcTemplate(values ...any) ldc {
+	t := ldc{}
+	t.Method = "getLdc"
+	t.Data.Type.Name = []string{"switch", "common"}
+	return t
+}
+
+func lastAlarmInfoTemplate(values ...any) lastAlarmInfo {
+	t := lastAlarmInfo{}
+	t.Method = "getLastAlarmInfo"
+	t.Data.Type.Name = []string{"chn1_msg_alarm_info"}
+	return t
+}
+
+func ledStatusTemplate(values ...any) ledStatus {
+	t := ledStatus{}
+	t.Method = "getLedStatus"
+	t.Data.Type.Name = []string{"config"}
+	return t
+}
+
+func targetTrackConfigTemplate(values ...any) targetTrackConfig {
+	t := targetTrackConfig{}
+	t.Method = "getTargetTrackConfig"
+	t.Data.Type.Name = []string{"target_track_info"}
+	return t
+}
+
+func presetConfigTemplate(values ...any) presetConfig {
+	t := presetConfig{}
+	t.Method = "getPresetConfig"
+	t.Data.Type.Name = []string{"preset"}
+	return t
+}
+
+func firmwareUpdateStatusTemplate(values ...any) firmwareUpdateStatus {
+	t := firmwareUpdateStatus{}
+	t.Method = "getFirmwareUpdateStatus"
+	t.Data.Type.Name = []string{"upgrade_status"}
+	return t
+}
+
+func mediaEncryptTemplate(values ...any) mediaEncrypt {
+	t := mediaEncrypt{}
+	t.Method = "getMediaEncrypt"
+	t.Data.Type.Name = []string{"media_encrypt"}
+	return t
+}
+
+func connectionTypeTemplate(values ...any) connectionType {
+	t := connectionType{}
+	t.Method = "getConnectionType"
+	t.Data.Type.Name = []string{"get_connection_type"}
+	return t
+}
+
+func lightFrequencyInfoTemplate(values ...any) lightFrequencyInfo {
+	t := lightFrequencyInfo{}
+	t.Method = "getLightFrequencyInfo"
+	t.Data.Type.Name = "common"
+	return t
+}
+
+func lightFrequencyCapabilityTemplate(values ...any) lightFrequencyCapability {
+	t := lightFrequencyCapability{}
+	t.Method = "getLightFrequencyCapability"
+	t.Data.Type.Name = "common"
+	return t
+}
+
+func childDeviceListTemplate(values ...any) childDeviceList {
+	t := childDeviceList{}
+	t.Method = "getChildDeviceList"
+	t.Data.Type.StartIndex = 0
+	return t
+}
+
+func rotationStatusTemplate(values ...any) rotationStatus {
+	t := rotationStatus{}
+	t.Method = "getRotationStatus"
+	t.Data.Type.Name = []string{"switch"}
+	return t
+}
+
+func nightVisionModeConfigTemplate(values ...any) nightVisionModeConfig {
+	t := nightVisionModeConfig{}
+	t.Method = "getNightVisionModeConfig"
+	t.Data.Type.Name = "switch"
+	return t
+}
+
+func whitelampStatusTemplate(values ...any) whitelampStatus {
+	t := whitelampStatus{}
+	t.Method = "getWhitelampStatus"
+	t.Data.Type.GetWtlStatus = []string{"null"}
+	return t
+}
+
+func whitelampConfigTemplate(values ...any) whitelampConfig {
+	t := whitelampConfig{}
+	t.Method = "getWhitelampConfig"
+	t.Data.Type.Name = "switch"
+	return t
+}
+
+func msgPushConfigTemplate(values ...any) msgPushConfig {
+	t := msgPushConfig{}
+	t.Method = "getMsgPushConfig"
+	t.Data.Type.Name = []string{"chn1_msg_push_info"}
+	return t
+}
+
+func sdCardStatusTemplate(values ...any) sdCardStatus {
+	t := sdCardStatus{}
+	t.Method = "getSdCardStatus"
+	t.Data.Type.Table = []string{"hd_info"}
+	return t
+}
+
+func circularRecordingConfigTemplate(values ...any) circularRecordingConfig {
+	t := circularRecordingConfig{}
+	t.Method = "getCircularRecordingConfig"
+	t.Data.Type.Name = "harddisk"
+	return t
+}
+
+func recordPlanTemplate(values ...any) recordPlan {
+	t := recordPlan{}
+	t.Method = "getRecordPlan"
+	t.Data.Type.Name = []string{"chn1_channel"}
+	return t
+}
+
+func firmwareAutoUpgradeConfigTemplate(values ...any) firmwareAutoUpgradeConfig {
+	t := firmwareAutoUpgradeConfig{}
+	t.Method = "getFirmwareAutoUpgradeConfig"
+	t.Data.Type.Name = []string{"common"}
+	return t
+}
+
+// Connect is general function for connecting to Camera
+func Connect(host string, user string, password string) *Tapo {
+	o := new(Tapo)
+	o.LastFile, _ = filepath.Abs(filepath.Dir(os.Args[0]))
+	o.Host = host
+	o.Port = "443"
+	o.User = user
+	o.Password = password
+	o.init()
+	o.auth()
+	o.getDevice()
+	o.getImageSettings()
+	o.getPresets()
+
+	return o
+}
+
 // Firsty initialise
 func (o *Tapo) init() {
-	h := md5.New()
-	io.WriteString(h, o.Password)
-	o.hashedPassword = strings.ToUpper(fmt.Sprintf("%x", h.Sum(nil)))
+	o.hashedPasswordMD5 = hashNHexOld(o.Password)
+	o.hashedPasswordSha256 = hashNHex(o.Password)
+	o.hostURL = `https://` + o.Host + `:` + o.Port
+
 	newParam := make(map[string]string)
 	o.Parameters = newParam
 	o.Parameters["Host"] = o.Host
@@ -496,11 +1397,11 @@ func (o *Tapo) init() {
 
 	o.Settings.VisibleOsdTime = new(child)
 	o.Settings.VisibleOsdTime.Value = true
-	o.Settings.VisibleOsdTime.run = o.setOsd
+	o.Settings.VisibleOsdTime.run = o.setOsdTime
 
 	o.Settings.VisibleOsdText = new(child)
 	o.Settings.VisibleOsdText.Value = false
-	o.Settings.VisibleOsdText.run = o.setOsd
+	o.Settings.VisibleOsdText.run = o.setOsdText
 
 	o.Settings.OsdText = ""
 
@@ -558,10 +1459,6 @@ func (o *Tapo) init() {
 	o.Settings.PrintImageSettings.Value = true
 	o.Settings.PrintImageSettings.run = o.getImageSettings
 
-	o.Settings.PrintImageSettings2 = new(child)
-	o.Settings.PrintImageSettings2.Value = true
-	o.Settings.PrintImageSettings2.run = o.getImageSettings2
-
 	o.Elements.ImageCorrection = new(child)
 	o.Elements.ImageCorrection.Value = true
 	o.Elements.ImageCorrection.run = o.setImageCorrection
@@ -572,16 +1469,36 @@ func (o *Tapo) init() {
 
 	o.NextPreset = o.setNextPreset
 	o.Reboot = o.rebootDevice
+}
 
-	o.getImageSettings()
+// Pack and encode request
+func pack(request any, key, iv []byte) secure {
+	requestJSON, err := json.Marshal(request)
+	if err != nil {
+		p("Error pack query")
+	}
+	return secureTemplate(
+		encodeB64(
+			encodeAES(requestJSON, key, iv),
+		),
+	)
+	//return template[secure](encodeB64(encodeAES(requestJSON, key, iv)))
 }
 
 // POST query to cam
-func (o *Tapo) query(data []byte) []byte {
-	body := bytes.NewReader(data)
-	req, _ := http.NewRequest("POST", o.hostURL, body)
+func (o *Tapo) query(data any, host string, encrypt bool) []byte {
+	if encrypt {
+		data = pack(data, o.Key, o.Iv)
+	}
+	dataBody, _ := json.Marshal(data)
+	body := bytes.NewReader(dataBody)
+	req, _ := http.NewRequest("POST", host, body)
 	for k, v := range o.Parameters {
 		req.Header.Add(k, v)
+	}
+	if encrypt {
+		req.Header.Add("Seq", o.Seq)
+		req.Header.Add("Tapo_tag", hashNHex(hashNHex(o.hashedPassword)+string(dataBody)+o.Seq))
 	}
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{
@@ -593,29 +1510,130 @@ func (o *Tapo) query(data []byte) []byte {
 	if err != nil {
 		return []byte{}
 	}
-	b, err := ioutil.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return []byte{}
+	}
+	if encrypt {
+		result := new(queryResponse)
+		json.Unmarshal(b, &result)
+		return []byte(decodeAES([]byte(decodeB64(result.Result.Response)), o.Key, o.Iv))
 	}
 	defer resp.Body.Close()
 	return b
 }
 
+// Check insecure of authorise.
+// At this moment the simplest way is send hash(sha256)
+// (but not best and stable).
+// On firmware >= 1.3.9(11 for new hardware) old type of authorise with hash(md5) will not valid
+func (o *Tapo) auth() {
+	o.hashedPassword = o.hashedPasswordSha256
+	o.Encrypt = false
+	result := new(updateStokReturn)
+	json.Unmarshal(o.query(updateStokTemplate(o.User, o.hashedPassword), o.hostURL, false), &result)
+	if result.ErrorCode == 0 && result.Result.StartSeq != nil {
+		o.InsecureAuth = true
+	} else {
+		o.InsecureAuth = false
+	}
+}
+
+func hash(value string) []byte {
+	h := sha256.Sum256([]byte(value))
+	return h[:]
+}
+
+func hashNHex(value string) string {
+	return strings.ToUpper(fmt.Sprintf("%x", sha256.Sum256([]byte(value))))
+}
+
+func hashNHexOld(value string) string {
+	return strings.ToUpper(fmt.Sprintf("%x", md5.Sum([]byte(value))))
+}
+
+func encodeAES(text []byte, key []byte, iv []byte) string {
+	pad := aes.BlockSize - len(text)%aes.BlockSize
+	bText := append(text, bytes.Repeat([]byte{byte(pad)}, pad)...)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		p(err)
+	}
+	encoded := make([]byte, len(bText))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(encoded, bText)
+	return string(encoded)
+}
+
+func decodeAES(text []byte, key []byte, iv []byte) string {
+	decoded := text
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		p(err)
+	}
+	cipher.NewCBCDecrypter(block, iv).CryptBlocks(decoded, decoded)
+	return string(decoded)
+}
+
+func encodeB64(text string) string {
+	return base64.StdEncoding.EncodeToString([]byte(text))
+}
+
+func decodeB64(text string) string {
+	data, err := base64.StdEncoding.DecodeString(text)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func (o *Tapo) getDigestPasswd() (string, string) {
+	result := new(loginInsecureResponse)
+	err := json.Unmarshal(o.query(loginInitTemplate(o.User), o.hostURL, false), &result)
+	if err != nil {
+		p("Check! response struct outdated")
+	}
+	return hashNHex(o.hashedPassword + result.Result.Data.Nonce), result.Result.Data.Nonce
+}
+
 // Refresh stok. For authentication
 func (o *Tapo) update() {
-	o.hostURL = `https://` + o.Host + `:` + o.Port
-	bodyStruct := new(updateStok)
+	if o.InsecureAuth {
+		o.updateInsecure()
+	} else {
+		o.updateRaw()
+	}
+}
+
+func (o *Tapo) updateInsecure() {
+	o.hashedPassword = o.hashedPasswordSha256
+	hashPass, nonce := o.getDigestPasswd()
+	o.Key = hash("lsk" + nonce + hashPass)[:aes.BlockSize]
+	o.Iv = hash("ivb" + nonce + hashPass)[:aes.BlockSize]
+	o.Encrypt = true
 	result := new(updateStokReturn)
-	bodyStruct.Method = MethodLogin
-	bodyStruct.Params.Hashed = true
-	bodyStruct.Params.Username = o.User
-	bodyStruct.Params.Password = o.hashedPassword
-	data, _ := json.Marshal(bodyStruct)
-	json.Unmarshal(o.query(data), &result)
-	o.stokID = result.Result.Stok
-	o.userGroup = result.Result.UserGroup
-	o.hostURL += `/stok=` + o.stokID + `/ds`
-	if result.ErrorCode != 0 {
+	json.Unmarshal(o.query(loginNewTemplate(o.User, hashPass+nonce), o.hostURL, false), &result)
+	if result.ErrorCode == 0 && result.Result.StartSeq != nil {
+		//version >= 1.3.9(11)
+		o.stokID = result.Result.Stok
+		o.hostURLStok = o.hostURL + `/stok=` + o.stokID + `/ds`
+		o.Seq = strconv.Itoa(*result.Result.StartSeq)
+		o.userGroup = result.Result.UserGroup
+	} else {
+		p(`Authenticate failed. Try use another cred.`)
+	}
+}
+
+func (o *Tapo) updateRaw() {
+	o.hashedPassword = o.hashedPasswordMD5
+	o.Encrypt = false
+	result := new(updateStokReturn)
+	json.Unmarshal(o.query(updateStokTemplate(o.User, o.hashedPassword), o.hostURL, false), &result)
+	if result.ErrorCode == 0 && result.Result.StartSeq == nil {
+		//version < 1.3.9(11)
+		o.stokID = result.Result.Stok
+		o.hostURLStok = o.hostURL + `/stok=` + o.stokID + `/ds`
+		o.userGroup = result.Result.UserGroup
+	} else {
 		p(`Authenticate failed. Try use another cred. login - "admin", password - your password in Tapo account.`)
 		if o.UserDef != o.User {
 			o.UserDef = o.User
@@ -626,51 +1644,47 @@ func (o *Tapo) update() {
 			panic("!end operation authenticate!")
 		}
 	}
-	o.getTime()
 }
 
 // Get information about device tapo c200
 func (o *Tapo) getDevice() {
 	o.update()
-	bodyStruct := new(device)
+	ret := o.query(manyTemplate(deviceInfoTemplate("")), o.hostURLStok, o.Encrypt)
 	result := new(deviceRet)
-	bodyStruct.Method = MethodGet
-	bodyStruct.DeviceInfo.Name = []string{"basic_info"}
-	data, _ := json.Marshal(bodyStruct)
-	json.Unmarshal(o.query(data), &result)
-	o.deviceModel = result.DeviceInfo.BasicInfo.DeviceModel
-	o.deviceID = result.DeviceInfo.BasicInfo.DevID
+	json.NewDecoder(bytes.NewReader(ret)).Decode(&result)
+	o.deviceID = result.Result.Responses[0].Result.DeviceInfo.BasicInfo.DevID
+	o.deviceModel = result.Result.Responses[0].Result.DeviceInfo.BasicInfo.DeviceModel
 }
 
 // Manual move
-//  10 = 10 degree
+//
+//	10 = 10 degree
+//
 // -10 = 10 degree reverse
-func (o *Tapo) setMovePosition(x int, y int) {
+func (o *Tapo) setMovePosition(x, y int) {
 	o.update()
-	bodyStruct := new(movePosition)
-	bodyStruct.Method = MethodDo
-	bodyStruct.Motor.Move.XCoord = strconv.Itoa(x)
-	bodyStruct.Motor.Move.YCoord = strconv.Itoa(y)
-	data, _ := json.Marshal(bodyStruct)
-	o.query(data)
+	o.query(movePositionTemplate(x, y), o.hostURLStok, o.Encrypt)
+}
+
+// Move action by X and Y
+func (o *Tapo) setMoveAction() {
+	x, _ := strconv.Atoi(o.Elements.MoveX)
+	y, _ := strconv.Atoi(o.Elements.MoveY)
+	o.setMovePosition(x, y)
 }
 
 // Get all making Presets in App
 func (o *Tapo) getPresets() {
-	if o.Rotate {
-		o.update()
-		bodyStruct := new(presetList)
-		result := new(presetListReturn)
-		bodyStruct.Method = MethodGet
-		bodyStruct.Preset.Name = []string{"preset"}
-		data, _ := json.Marshal(bodyStruct)
-		json.Unmarshal(o.query(data), &result)
-		for i, v := range result.Preset.Preset.ID {
-			pos := new(presets)
-			pos.ID = v
-			pos.Name = result.Preset.Preset.Name[i]
-			o.presets = append(o.presets, pos)
-
+	o.update()
+	ret := o.query(manyTemplate(presetConfigTemplate("")), o.hostURLStok, o.Encrypt)
+	result := new(presetListReturn)
+	json.NewDecoder(bytes.NewReader(ret)).Decode(&result)
+	if len(result.Result.Responses) > 0 {
+		o.Rotate = true
+	}
+	for _, v := range result.Result.Responses {
+		for kk, vv := range v.Result.Preset.Preset.ID {
+			o.presets = append(o.presets, &presets{ID: vv, Name: v.Result.Preset.Preset.Name[kk]})
 		}
 	}
 }
@@ -680,59 +1694,40 @@ func (o *Tapo) setNextPreset() {
 	if o.Rotate {
 		o.update()
 		o.lastPosition = o.rLast()
-		max := new(presets)
-		max.ID = "-9999"
-		min := new(presets)
-		min.ID = "9999"
-		next := new(presets)
-		next.ID = "0"
-		check := true
-		for _, v := range o.presets {
-			vID, _ := strconv.Atoi(v.ID)
-			minID, _ := strconv.Atoi(min.ID)
-			maxID, _ := strconv.Atoi(max.ID)
-			if vID < minID {
-				min = v
-			}
-			if vID > maxID {
-				max = v
-			}
-			if vID > o.lastPosition && check {
-				next = v
-				check = false
-			}
+		if len(o.presets) > o.lastPosition+1 {
+			o.lastPosition++
+		} else {
+			o.lastPosition = 0
 		}
-		if next.ID == "0" {
-			next = min
-			o.wLast(min.ID)
-		}
-		bodyStruct := new(nextPreset)
-		bodyStruct.Method = MethodDo
-		bodyStruct.Preset.GotoPreset.ID = next.ID
-		data, _ := json.Marshal(bodyStruct)
+		next := o.presets[o.lastPosition]
 		if o.Settings.PresetChangeOsd.Value {
 			o.Settings.OsdText = next.Name
 			o.Settings.VisibleOsdText.Value = true
 			o.Settings.VisibleOsdTime.Value = true
-			o.setOsd()
+			o.setOsdText()
 		}
-		o.query(data)
-		o.wLast(next.ID)
+		o.query(
+			nextPresetTemplate(next.ID),
+			o.hostURLStok,
+			o.Encrypt,
+		)
+		o.wLast(o.lastPosition)
 	}
 }
 
 // Write log last file
-func (o *Tapo) wLast(text string) {
-	ioutil.WriteFile(o.LastFile+`/`+LastFileName, []byte(text), 0775)
+func (o *Tapo) wLast(v int) {
+	text := strconv.Itoa(v)
+	os.WriteFile(o.LastFile+`/`+o.deviceID+".last_preset", []byte(text), 0775)
 }
 
 // Read log last file
 func (o *Tapo) rLast() int {
-	if lastDef, err := ioutil.ReadFile(o.LastFile + `/` + LastFileName); err == nil {
+	if lastDef, err := os.ReadFile(o.LastFile + `/` + o.deviceID + ".last_preset"); err == nil {
 		last, _ := strconv.Atoi(string(lastDef))
 		return last
 	}
-	os.Create(o.LastFile + `/` + LastFileName)
+	os.Create(o.LastFile + `/` + o.deviceID + ".last_preset")
 	return 0
 }
 
@@ -750,19 +1745,15 @@ func (o *Tapo) runAllPresets(timer string) {
 // Reboot device
 func (o *Tapo) rebootDevice() {
 	o.update()
-	bodyStruct := new(reboot)
-	bodyStruct.Method = MethodDo
-	bodyStruct.System.Reboot = "null"
-	data, _ := json.Marshal(bodyStruct)
-	o.query(data)
+	o.query(rebootTemplate(), o.hostURLStok, o.Encrypt)
 }
 
 // special function xBool
 func (o *Types) xBool(s interface{}) *Types {
-	switch s.(type) {
+	switch val := s.(type) {
 	case string:
-		if _, err := strconv.Atoi(s.(string)); err == nil {
-			ss := strings.Split(s.(string), "")
+		if _, err := strconv.Atoi(val); err == nil {
+			ss := strings.Split(val, "")
 			sslen := strconv.Itoa(len(ss))
 			ssss := ss[len(ss)-1]
 			tmp, _ := reflect.TypeOf(*new(Stages)).FieldByName("sBool" + sslen)
@@ -770,13 +1761,13 @@ func (o *Types) xBool(s interface{}) *Types {
 				o.Default = val
 			}
 		} else {
-			o.Default = s.(string)
+			o.Default = val
 			o.Head = o.Default
 			o.test()
 			return o
 		}
 	case bool:
-		switch s.(bool) {
+		switch val {
 		case true:
 			tmp, _ := reflect.TypeOf(*new(Stages)).FieldByName("sBool" + DefXBool)
 			if val, ex := tmp.Tag.Lookup("1"); ex {
@@ -789,7 +1780,7 @@ func (o *Types) xBool(s interface{}) *Types {
 			}
 		}
 	case int:
-		ss := strings.Split(strconv.Itoa(s.(int)), "")
+		ss := strings.Split(strconv.Itoa(val), "")
 		sslen := strconv.Itoa(len(ss))
 		ssss := ss[len(ss)-1]
 		tmp, _ := reflect.TypeOf(*new(Stages)).FieldByName("sBool" + sslen)
@@ -834,10 +1825,10 @@ func (o *Types) test() {
 	}
 }
 
-func sBool(val interface{}) bool {
-	switch val.(type) {
+func sBool(value interface{}) bool {
+	switch val := value.(type) {
 	case string:
-		switch val.(string) {
+		switch val {
 		case "+":
 			return true
 		case "-":
@@ -860,7 +1851,7 @@ func sBool(val interface{}) bool {
 			return true
 		}
 	case bool:
-		return val.(bool)
+		return val
 	default:
 		fmt.Println("Error!")
 		return false
@@ -868,12 +1859,76 @@ func sBool(val interface{}) bool {
 	return false
 }
 
-// Take value
-func addBoolArrString(arr []string, b bool, val string) []string {
-	if b {
-		arr = append(arr, val)
+func (o *Tapo) getAlarm() (string, []string, string) {
+	o.update()
+	ret := o.query(manyTemplate(lastAlarmInfoTemplate("")), o.hostURLStok, o.Encrypt)
+	result := new(lastAlarmInfoResponse)
+	p(string(ret))
+	json.NewDecoder(bytes.NewReader(ret)).Decode(&result)
+
+	return result.Result.Responses[0].Result.MsgAlarm.Chn1MsgAlarmInfo.Enabled, result.Result.Responses[0].Result.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode, result.Result.Responses[0].Result.MsgAlarm.Chn1MsgAlarmInfo.AlarmType
+}
+
+func (o *Tapo) updateAlarmSound() {
+	o.update()
+	enabled, list, alarmType := o.getAlarm()
+	newList := []string{}
+	for _, v := range list {
+		if v != "sound" && enabled == "on" {
+			newList = append(newList, v)
+		}
 	}
-	return arr
+
+	if o.Elements.AlarmModeUpdateSound.Value {
+		newList = append(newList, "sound")
+		enabled = "on"
+	}
+
+	if len(newList) == 0 {
+		enabled = "off"
+		newList = []string{"sound", "light"}
+	}
+
+	o.query(
+		alarmTemplate(
+			alarmType,
+			newList,
+			enabled,
+		),
+		o.hostURLStok,
+		o.Encrypt,
+	)
+}
+
+func (o *Tapo) updateAlarmFlash() {
+	o.update()
+	enabled, list, alarmType := o.getAlarm()
+	newList := []string{}
+	for _, v := range list {
+		if v != "light" && enabled == "on" {
+			newList = append(newList, v)
+		}
+	}
+
+	if o.Elements.AlarmModeUpdateFlash.Value {
+		newList = append(newList, "light")
+		enabled = "on"
+	}
+
+	if len(newList) == 0 {
+		enabled = "off"
+		newList = []string{"sound", "light"}
+	}
+
+	o.query(
+		alarmTemplate(
+			alarmType,
+			newList,
+			enabled,
+		),
+		o.hostURLStok,
+		o.Encrypt,
+	)
 }
 
 // Set alarm mode
@@ -882,78 +1937,67 @@ func addBoolArrString(arr []string, b bool, val string) []string {
 // DetectEnableFlash - blinking led diode
 func (o *Tapo) setAlarm() {
 	o.update()
-	bodyStruct := new(alarm)
-	bodyStruct.Method = MethodSet
-	if o.Settings.DetectSoundAlternativeMode.Value {
-		bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmType = "1"
-	} else {
-		bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmType = "0"
+
+	list := []string{}
+
+	if o.Settings.DetectEnableSound.Value && o.Settings.DetectEnableFlash.Value {
+		list = []string{"sound", "light"}
+	} else if !o.Settings.DetectEnableSound.Value && !o.Settings.DetectEnableFlash.Value {
+		list = []string{"sound", "light"}
+	} else if o.Settings.DetectEnableSound.Value {
+		list = []string{"sound"}
+	} else if o.Settings.DetectEnableFlash.Value {
+		list = []string{"light"}
 	}
-	bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.LightType = "1"
-	bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.Enabled = new(Types).xBool(o.Elements.AlarmMode.Value).Default
-	bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode = addBoolArrString(bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode, o.Settings.DetectEnableSound.Value, "sound")
-	bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode = addBoolArrString(bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode, o.Settings.DetectEnableFlash.Value, "light")
-	bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode = addBoolArrString(bodyStruct.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode, !(o.Settings.DetectEnableSound.Value && o.Settings.DetectEnableFlash.Value), "sound")
-	data, _ := json.Marshal(bodyStruct)
-	o.query(data)
+
+	alarmType := "0"
+	if o.Settings.DetectSoundAlternativeMode.Value {
+		alarmType = "1"
+	}
+
+	o.query(
+		alarmTemplate(
+			alarmType,
+			list,
+			new(Types).xBool(o.Elements.AlarmMode.Value).Default,
+		),
+		o.hostURLStok,
+		o.Encrypt,
+	)
+}
+
+// Turn Indicator diode (red, green)
+func (o *Tapo) setLedAction(value string) { //on off
+	o.update()
+	o.query(setLedTemplate(value), o.hostURLStok, o.Encrypt)
 }
 
 // Turn Indicator diode (red, green)
 func (o *Tapo) setLed() {
-	o.update()
-	bodyStruct := new(led)
-	bodyStruct.Method = MethodSet
-	bodyStruct.Led.Config.Enabled = new(Types).xBool(o.Elements.Indicator.Value).Default
-	data, _ := json.Marshal(bodyStruct)
-	o.query(data)
-
+	o.setLedAction(new(Types).xBool(o.Elements.Indicator.Value).Default)
 }
 
 // Get Time
 func (o *Tapo) getTime() {
+	o.update()
 	result := new(getTimeRet)
-	bodyStruct := new(getTime)
-	bodyStruct.Method = MethodGet
-	bodyStruct.System.Name = []string{"clock_status"}
-	data, _ := json.Marshal(bodyStruct)
-	json.Unmarshal(o.query(data), &result)
+	json.Unmarshal(o.query(getTimeTemplate(), o.hostURLStok, o.Encrypt), &result)
 	o.TimeStr = result.System.ClockStatus.LocalTime
 }
 
 // Get Settings Image
 func (o *Tapo) getImageSettings() {
 	o.update()
-	bodyStruct := new(getImageSettings)
-	bodyStruct.Method = MethodGet
-	bodyStruct.Image.Name = "common"
-	data, _ := json.Marshal(bodyStruct)
-	o.query(data)
-	o.getImageSettings2()
-	o.getTime()
-}
-
-// Get Correction
-func (o *Tapo) getImageSettings2() {
-	o.update()
 	result := new(getImageSettingsRet)
-	bodyStruct := new(getImageSettings)
-	bodyStruct.Method = MethodGet
-	bodyStruct.Image.Name = "switch"
-	data, _ := json.Marshal(bodyStruct)
-	json.Unmarshal(o.query(data), &result)
-	o.Rotate = new(Types).xBool(result.Image.Switch.RotateType).isTrue
-	o.FishEye = new(Types).xBool(result.Image.Switch.Ldc).isTrue
-	o.Flip = result.Image.Switch.FlipType == "center"
+	json.NewDecoder(bytes.NewReader(o.query(manyTemplate(ldcTemplate()), o.hostURLStok, o.Encrypt))).Decode(&result)
+	o.FishEye = new(Types).xBool(result.Result.Responses[0].Result.Image.Switch.Ldc).isTrue
+	o.Flip = result.Result.Responses[0].Result.Image.Switch.FlipType == "center"
 }
 
 // Set Correction
 func (o *Tapo) setImageCorrection() {
 	o.update()
-	bodyStruct := new(setImageCorrection)
-	bodyStruct.Method = MethodSet
-	bodyStruct.Image.Switch.Ldc = new(Types).xBool(o.Elements.ImageCorrection.Value).Default
-	data, _ := json.Marshal(bodyStruct)
-	o.query(data)
+	o.query(setImageCorrectionTemplate(new(Types).xBool(o.Elements.ImageCorrection.Value).Default), o.hostURLStok, o.Encrypt)
 }
 
 // Set Flip
@@ -963,133 +2007,111 @@ func (o *Tapo) setImageFlip() {
 		val = "center"
 	}
 	o.update()
-	bodyStruct := new(setImageFlip)
-	bodyStruct.Method = MethodSet
-	bodyStruct.Image.Switch.FlipType = val
-	data, _ := json.Marshal(bodyStruct)
-	o.query(data)
+	o.query(setImageFlipTemplate(val), o.hostURLStok, o.Encrypt)
+}
+
+// Motion detect with sensitivity
+func (o *Tapo) getDetect() string {
+	o.update()
+	result := new(detectionConfigResponse)
+	ret := o.query(manyTemplate(detectionConfigTemplate("")), o.hostURLStok, o.Encrypt)
+	json.NewDecoder(bytes.NewReader(ret)).Decode(&result)
+	return result.Result.Responses[0].Result.MotionDetection.MotionDet.Enabled
+}
+
+// Motion detect with sensitivity
+func (o *Tapo) updateSens() {
+	o.update()
+	enabled := o.getDetect()
+	p(string(o.query(detectTemplate(enabled, o.Settings.DetectSensitivity), o.hostURLStok, o.Encrypt)))
 }
 
 // Motion detect with sensitivity
 func (o *Tapo) setDetect() {
 	o.update()
-	bodyStruct := new(detect)
-	bodyStruct.Method = MethodSet
-	switch {
-	case o.Settings.DetectSensitivity == 1:
-		bodyStruct.MotionDetection.MotionDet.DigitalSensitivity = "20"
-	case o.Settings.DetectSensitivity == 2:
-		bodyStruct.MotionDetection.MotionDet.DigitalSensitivity = "50"
-	case o.Settings.DetectSensitivity == 3:
-		bodyStruct.MotionDetection.MotionDet.DigitalSensitivity = "80"
-	default:
-		bodyStruct.MotionDetection.MotionDet.DigitalSensitivity = "20"
-	}
-	bodyStruct.MotionDetection.MotionDet.Enabled = new(Types).xBool(o.Elements.DetectMode.Value).Default
-	data, _ := json.Marshal(bodyStruct)
-	o.query(data)
+	p(string(o.query(detectTemplate(new(Types).xBool(o.Elements.DetectMode.Value).Default, o.Settings.DetectSensitivity), o.hostURLStok, o.Encrypt)))
+}
+
+// Motion detect with sensitivity
+func (o *Tapo) setDetectPerson() {
+	o.update()
+	o.query(setPersonDetectTemplate(new(Types).xBool(o.Elements.DetectPersonMode.Value).Default), o.hostURLStok, o.Encrypt)
 }
 
 // Turn camera in private mode with stop video channel
 func (o *Tapo) setPrivacy() {
 	o.update()
-	bodyStruct := new(privacy)
-	bodyStruct.Method = MethodSet
-	bodyStruct.LensMask.LensMaskInfo.Enabled = new(Types).xBool(o.Elements.PrivacyMode.Value).Default
-	data, _ := json.Marshal(bodyStruct)
-	o.query(data)
+	o.query(privacyTemplate(new(Types).xBool(o.Elements.PrivacyMode.Value).Default), o.hostURLStok, o.Encrypt)
 }
 
 // Turn irc flashlight
 func (o *Tapo) setNightMode() {
 	o.update()
-	bodyStruct := new(nightMode)
-	bodyStruct.Method = MethodSet
-	bodyStruct.Image.Common.InfType = new(Types).xBool(o.Elements.NightMode.Value).Default
-	data, _ := json.Marshal(bodyStruct)
-	o.query(data)
+	o.query(nightModeTemplate(new(Types).xBool(o.Elements.NightMode.Value).Default), o.hostURLStok, o.Encrypt)
 }
 
 // Turn irc flashlight
 func (o *Tapo) setNightModeAuto() {
 	if o.Elements.NightModeAuto.Value {
 		o.update()
-		bodyStruct := new(nightMode)
-		bodyStruct.Method = MethodSet
-		bodyStruct.Image.Common.InfType = "auto"
-		data, _ := json.Marshal(bodyStruct)
-		o.query(data)
+		o.query(nightModeTemplate("auto"), o.hostURLStok, o.Encrypt)
 	}
 }
 
 // Autotracking all motion. BETA
 func (o *Tapo) setAutotracking() {
 	o.update()
-	bodyStruct := new(autotracking)
-	bodyStruct.Method = MethodSet
-	bodyStruct.TargetTrack.TargetTrackInfo.Enabled = new(Types).xBool(o.Elements.AutotrackingMode.Value).Default
-	data, _ := json.Marshal(bodyStruct)
-	o.query(data)
+	o.query(autotrackingTemplate(new(Types).xBool(o.Elements.AutotrackingMode.Value).Default), o.hostURLStok, o.Encrypt)
 }
 
 // get Text OSD
-func (o *Tapo) getOsd() {
+func (o *Tapo) getOsd() (string, string) {
 	o.update()
-	bodyStruct := new(getOSD)
 	result := new(getOSDRet)
-	bodyStruct.Method = MethodGet
-	bodyStruct.OSD.Name = []string{"date", "week", "font"}
-	bodyStruct.OSD.Table = []string{"label_info"}
-	data, _ := json.Marshal(bodyStruct)
-	json.Unmarshal(o.query(data), &result)
+
+	bb := o.query(getOSDTemplate(), o.hostURLStok, o.Encrypt)
+	//p(string(bb))
+	json.NewDecoder(bytes.NewReader(bb)).Decode(&result)
 	o.Settings.OsdText = result.OSD.LabelInfo[0].LabelInfo1.Text
+	return result.OSD.LabelInfo[0].LabelInfo1.Enabled, result.OSD.Date.Enabled
 }
 
 // Text OSD
-func (o *Tapo) setOsd() {
+func (o *Tapo) setOsdTime() {
+	textEnabled, _ := o.getOsd()
+	o.update()
+	o.query(
+		osdTemplate(
+			new(Types).xBool(o.Settings.VisibleOsdTime.Value).Default,
+			textEnabled,
+			o.Settings.OsdText,
+		),
+		o.hostURLStok,
+		o.Encrypt,
+	)
+}
+
+// Text OSD
+func (o *Tapo) setOsdText() {
+	_, timeEnabled := "", ""
+
 	if len(o.Settings.OsdText) == 0 {
-		o.getOsd()
+		_, timeEnabled = o.getOsd()
 	}
 	if len(o.Settings.OsdText) > 16 {
 		//16 symbols, not bytes
 		o.Settings.OsdText = string([]rune(o.Settings.OsdText)[0:16])
 	}
 	o.update()
-	bodyStruct := new(osd)
-	bodyStruct.Method = MethodSet
-	bodyStruct.OSD.Date.Enabled = new(Types).xBool(o.Settings.VisibleOsdTime.Value).Default
-	bodyStruct.OSD.Date.XCoor = 0
-	bodyStruct.OSD.Date.YCoor = 0
-	bodyStruct.OSD.Font.Color = "white"
-	bodyStruct.OSD.Font.ColorType = "auto"
-	bodyStruct.OSD.Font.Display = "ntnb"
-	bodyStruct.OSD.Font.Size = "auto"
-	bodyStruct.OSD.LabelInfo1.Enabled = new(Types).xBool(o.Settings.VisibleOsdText.Value).Default
-	bodyStruct.OSD.LabelInfo1.Text = o.Settings.OsdText
-	bodyStruct.OSD.LabelInfo1.XCoor = 0
-	bodyStruct.OSD.LabelInfo1.YCoor = 450
-	//---china weeks---
-	bodyStruct.OSD.Week.Enabled = new(Types).xBool(false).Default
-	bodyStruct.OSD.Week.XCoor = 0
-	bodyStruct.OSD.Week.YCoor = 0
-	//---china weeks---
-	data, _ := json.Marshal(bodyStruct)
-	o.query(data)
-}
-
-// Connect is general function for connecting to Camera
-func Connect(host string, user string, password string) *Tapo {
-	o := new(Tapo)
-	o.LastFile, _ = filepath.Abs(filepath.Dir(os.Args[0]))
-	o.Host = host
-	o.Port = "443"
-	o.User = user
-	o.Password = password
-	o.init()
-	o.getDevice()
-	o.getPresets()
-
-	return o
+	o.query(
+		osdTemplate(
+			timeEnabled,
+			new(Types).xBool(o.Settings.VisibleOsdText.Value).Default,
+			o.Settings.OsdText,
+		),
+		o.hostURLStok,
+		o.Encrypt,
+	)
 }
 
 // On is turn settings
