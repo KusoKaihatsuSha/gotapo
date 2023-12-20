@@ -1361,7 +1361,7 @@ func firmwareAutoUpgradeConfigTemplate(values ...any) firmwareAutoUpgradeConfig 
 // Connect is general function for connecting to Camera
 func Connect(host string, user string, password string) *Tapo {
 	o := new(Tapo)
-	o.LastFile, _ = filepath.Abs(filepath.Dir(os.Args[0]))
+	o.LastFile, _ = os.Getwd()
 	o.Host = host
 	o.Port = "443"
 	o.User = user
@@ -1466,6 +1466,12 @@ func (o *Tapo) init() {
 	o.Elements.ImageFlip = new(child)
 	o.Elements.ImageFlip.Value = true
 	o.Elements.ImageFlip.run = o.setImageFlip
+
+	o.Elements.MoveX = ""
+	o.Elements.MoveY = ""
+	o.Settings.Move = new(child)
+	o.Settings.Move.Value = true
+	o.Settings.Move.run = o.setMoveAction
 
 	o.NextPreset = o.setNextPreset
 	o.Reboot = o.rebootDevice
@@ -1718,16 +1724,16 @@ func (o *Tapo) setNextPreset() {
 // Write log last file
 func (o *Tapo) wLast(v int) {
 	text := strconv.Itoa(v)
-	os.WriteFile(o.LastFile+`/`+o.deviceID+".last_preset", []byte(text), 0775)
+	os.WriteFile(filepath.Join(o.LastFile, o.deviceID+".last_preset"), []byte(text), 0775)
 }
 
 // Read log last file
 func (o *Tapo) rLast() int {
-	if lastDef, err := os.ReadFile(o.LastFile + `/` + o.deviceID + ".last_preset"); err == nil {
+	if lastDef, err := os.ReadFile(filepath.Join(o.LastFile, o.deviceID+".last_preset")); err == nil {
 		last, _ := strconv.Atoi(string(lastDef))
 		return last
 	}
-	os.Create(o.LastFile + `/` + o.deviceID + ".last_preset")
+	os.Create(filepath.Join(o.LastFile, o.deviceID+".last_preset"))
 	return 0
 }
 
@@ -2068,11 +2074,10 @@ func (o *Tapo) setAutotracking() {
 func (o *Tapo) getOsd() (string, string) {
 	o.update()
 	result := new(getOSDRet)
-
-	bb := o.query(getOSDTemplate(), o.hostURLStok, o.Encrypt)
-	//p(string(bb))
-	json.NewDecoder(bytes.NewReader(bb)).Decode(&result)
-	o.Settings.OsdText = result.OSD.LabelInfo[0].LabelInfo1.Text
+	json.NewDecoder(bytes.NewReader(o.query(getOSDTemplate(), o.hostURLStok, o.Encrypt))).Decode(&result)
+	if len(o.Settings.OsdText) == 0 {
+		o.Settings.OsdText = result.OSD.LabelInfo[0].LabelInfo1.Text
+	}
 	return result.OSD.LabelInfo[0].LabelInfo1.Enabled, result.OSD.Date.Enabled
 }
 
@@ -2093,15 +2098,13 @@ func (o *Tapo) setOsdTime() {
 
 // Text OSD
 func (o *Tapo) setOsdText() {
-	_, timeEnabled := "", ""
+	_, timeEnabled := o.getOsd()
 
-	if len(o.Settings.OsdText) == 0 {
-		_, timeEnabled = o.getOsd()
-	}
 	if len(o.Settings.OsdText) > 16 {
 		//16 symbols, not bytes
 		o.Settings.OsdText = string([]rune(o.Settings.OsdText)[0:16])
 	}
+
 	o.update()
 	o.query(
 		osdTemplate(
