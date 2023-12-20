@@ -1429,27 +1429,43 @@ func (o *Tapo) init() {
 	o.Settings.PresetChangeOsd.Value = false
 	o.Settings.PresetChangeOsd.run = fnil
 
+	o.Elements.DetectModeUpdateSens = new(child)
+	o.Elements.DetectModeUpdateSens.Value = false
+	o.Elements.DetectModeUpdateSens.run = o.updateSens
+
 	o.Elements.DetectMode = new(child)
 	o.Elements.DetectMode.Value = false
 	o.Elements.DetectMode.run = o.setDetect
+
+	o.Elements.DetectPersonMode = new(child)
+	o.Elements.DetectPersonMode.Value = false
+	o.Elements.DetectPersonMode.run = o.setDetectPerson
 
 	o.Settings.DetectSensitivity = 1
 
 	o.Settings.DetectSoundAlternativeMode = new(child)
 	o.Settings.DetectSoundAlternativeMode.Value = false
-	o.Settings.DetectSoundAlternativeMode.run = o.setDetect
+	o.Settings.DetectSoundAlternativeMode.run = fnil
 
 	o.Settings.DetectEnableSound = new(child)
 	o.Settings.DetectEnableSound.Value = true
-	o.Settings.DetectEnableSound.run = o.setDetect
+	o.Settings.DetectEnableSound.run = fnil
 
 	o.Settings.DetectEnableFlash = new(child)
 	o.Settings.DetectEnableFlash.Value = false
-	o.Settings.DetectEnableFlash.run = o.setDetect
+	o.Settings.DetectEnableFlash.run = fnil
 
 	o.Elements.AlarmMode = new(child)
 	o.Elements.AlarmMode.Value = false
 	o.Elements.AlarmMode.run = o.setAlarm
+
+	o.Elements.AlarmModeUpdateFlash = new(child)
+	o.Elements.AlarmModeUpdateFlash.Value = false
+	o.Elements.AlarmModeUpdateFlash.run = o.updateAlarmFlash
+
+	o.Elements.AlarmModeUpdateSound = new(child)
+	o.Elements.AlarmModeUpdateSound.Value = false
+	o.Elements.AlarmModeUpdateSound.run = o.updateAlarmSound
 
 	o.Settings.Time = new(child)
 	o.Settings.Time.Value = true
