@@ -1883,11 +1883,8 @@ func sBool(value interface{}) bool {
 
 func (o *Tapo) getAlarm() (string, []string, string) {
 	o.update()
-	ret := o.query(manyTemplate(lastAlarmInfoTemplate("")), o.hostURLStok, o.Encrypt)
 	result := new(lastAlarmInfoResponse)
-	p(string(ret))
-	json.NewDecoder(bytes.NewReader(ret)).Decode(&result)
-
+	json.NewDecoder(bytes.NewReader(o.query(manyTemplate(lastAlarmInfoTemplate("")), o.hostURLStok, o.Encrypt))).Decode(&result)
 	return result.Result.Responses[0].Result.MsgAlarm.Chn1MsgAlarmInfo.Enabled, result.Result.Responses[0].Result.MsgAlarm.Chn1MsgAlarmInfo.AlarmMode, result.Result.Responses[0].Result.MsgAlarm.Chn1MsgAlarmInfo.AlarmType
 }
 
@@ -2045,13 +2042,13 @@ func (o *Tapo) getDetect() string {
 func (o *Tapo) updateSens() {
 	o.update()
 	enabled := o.getDetect()
-	p(string(o.query(detectTemplate(enabled, o.Settings.DetectSensitivity), o.hostURLStok, o.Encrypt)))
+	o.query(detectTemplate(enabled, o.Settings.DetectSensitivity), o.hostURLStok, o.Encrypt)
 }
 
 // Motion detect with sensitivity
 func (o *Tapo) setDetect() {
 	o.update()
-	p(string(o.query(detectTemplate(new(Types).xBool(o.Elements.DetectMode.Value).Default, o.Settings.DetectSensitivity), o.hostURLStok, o.Encrypt)))
+	o.query(detectTemplate(new(Types).xBool(o.Elements.DetectMode.Value).Default, o.Settings.DetectSensitivity), o.hostURLStok, o.Encrypt)
 }
 
 // Motion detect with sensitivity
